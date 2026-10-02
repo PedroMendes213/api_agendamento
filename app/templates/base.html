@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>
+        {% block title %}Agenda de Consultas{% endblock %}
+    </title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 20px;
+            background: #f4f6f8;
+            color: #1f2933;
+        }
+
+        header {
+            background: #1769aa;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+        }
+
+        .consulta {
+            background: white;
+            padding: 16px;
+            margin-bottom: 12px;
+            border-radius: 8px;
+            box-shadow: 0 1px 4px #0002;
+        }
+
+        .horario {
+            font-weight: bold;
+            color: #1769aa;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Clínica Médica</h1>
+        <p>Sistema interno de agenda</p>
+    </header>
+
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

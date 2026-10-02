@@ -1,0 +1,273 @@
+# Exercício 9 — Correção de vulnerabilidades de entrada e saída
+
+## 1. Objetivo
+
+Este exercício corrige vulnerabilidades relacionadas à validação de dados de entrada, autorização, SQL Injection e XSS armazenado.
+
+As correções foram aplicadas de forma centralizada na API de agendamento, preservando a organização modular entre:
+
+- `app/models.py`;
+- `app/auth.py`;
+- `app/routes/consultas.py`;
+- `app/routes/agenda.py`;
+- `app/templates/consultas.html`;
+- `tests/test_exercicio9.py`.
+
+Também foi analisado o endpoint `/agenda`, que não havia sido detalhado diretamente no Exercício 8, mas utiliza o mesmo campo `observacoes` e poderia reproduzir a vulnerabilidade de XSS armazenado.
+
+## 2. Validação de entrada
+
+Os modelos Pydantic passaram a utilizar validação explícita para rejeitar dados fora do formato esperado.
+
+Foram aplicadas as seguintes regras:
+
+- UUIDs são validados pelo tipo `UUID`;
+- status de consulta utiliza uma enumeração permitida;
+- escopos M2M utilizam uma enumeração permitida;
+- usernames utilizam regex;
+- códigos MFA utilizam regex alfanumérica;
+- nomes de clientes M2M utilizam regex;
+- datas de consulta precisam conter informação de fuso horário;
+- observações possuem limite máximo de tamanho;
+- caracteres nulos são rejeitados;
+- campos desconhecidos são rejeitados com `extra="forbid"`.
+
+Exemplo de regex utilizada para usernames:
+
+```python
+USERNAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,49}$"
+```
+
+Essa regra permite somente usernames com caracteres previamente definidos, evitando espaços, tags HTML e caracteres de controle.
+
+## 3. Rejeição de campos não declarados
+
+Os modelos de entrada utilizam:
+
+```python
+model_config = ConfigDict(extra="forbid")
+```
+
+Com isso, uma requisição como:
+
+```json
+{
+  "paciente_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "profissional_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  "data_hora": "2030-01-15T14:30:00-03:00",
+  "status": "agendada",
+  "campo_nao_declarado": "tentativa de injeção"
+}
+```
+
+é rejeitada pela API com:
+
+```text
+HTTP 422 Unprocessable Entity
+```
+
+Essa medida impede que campos inesperados sejam aceitos silenciosamente ou utilizados por alguma camada da aplicação.
+
+## 4. Prevenção contra SQL Injection
+
+As consultas continuam utilizando SQLModel e expressões parametrizadas.
+
+Exemplo utilizado:
+
+```python
+statement = select(Consulta).where(
+    Consulta.profissional_id == profissional_id
+)
+```
+
+Não foi utilizada concatenação de strings para montar comandos SQL.
+
+Além disso, parâmetros como `data` são convertidos diretamente para o tipo `date` pelo FastAPI. Uma tentativa como:
+
+```text
+2030-01-16' OR 1=1
+```
+
+não é aceita como uma data válida e resulta em:
+
+```text
+HTTP 422 Unprocessable Entity
+```
+
+A aplicação não executa o valor recebido como código SQL.
+
+## 5. Autenticação JWT centralizada
+
+A validação dos tokens foi mantida centralizada em `app/auth.py`.
+
+A função responsável por obter o usuário atual:
+
+```python
+obter_usuario_atual
+```
+
+realiza as seguintes verificações:
+
+- assinatura do JWT;
+- expiração do token;
+- existência do claim `token_type`;
+- existência do claim `sub`;
+- existência do claim `role`;
+- existência do usuário no banco;
+- usuário ativo;
+- correspondência entre o papel do token e o papel armazenado;
+- MFA quando habilitado.
+
+Tokens M2M também possuem validação própria, incluindo:
+
+- `token_type`;
+- `grant_type`;
+- `client_type`;
+- `client_id`;
+- correspondência entre `sub` e `client_id`;
+- escopo exigido;
+- cliente ativo;
+- escopos contratados pelo cliente.
+
+Dessa forma, as rotas não implementam validações JWT duplicadas.
+
+## 6. Correção de BOLA e verificação de ownership
+
+As verificações de ownership também permanecem centralizadas em `app/auth.py`.
+
+Foram utilizadas as funções:
+
+```python
+garantir_leitura_consulta
+garantir_gerenciamento_consulta
+garantir_profissional_da_consulta
+```
+
+Antes de retornar, atualizar ou excluir uma consulta, a aplicação verifica se:
+
+- o usuário é administrador;
+- o usuário é o profissional responsável;
+- o usuário possui o papel necessário para executar a operação.
+
+Um profissional tentando acessar uma consulta pertencente a outro profissional recebe:
+
+```text
+HTTP 403 Forbidden
+```
+
+Essa validação impede que um usuário altere apenas o identificador da URL para acessar dados de outra pessoa.
+
+## 7. Prevenção contra conflito de horários
+
+Foi adicionada uma validação para impedir dois agendamentos ativos para o mesmo profissional no mesmo horário.
+
+Os status considerados ocupantes do horário são:
+
+- `agendada`;
+- `confirmada`.
+
+Quando existe conflito, a API retorna:
+
+```text
+HTTP 409 Conflict
+```
+
+Essa regra reduz inconsistências na agenda e impede que duas consultas sejam marcadas simultaneamente para o mesmo profissional.
+
+## 8. Prevenção de XSS armazenado
+
+O campo `observacoes` pode receber texto enviado pelo cliente, portanto não deve ser inserido diretamente no HTML como conteúdo confiável.
+
+O endpoint `/agenda` foi protegido com:
+
+```python
+templates.env.autoescape = True
+```
+
+O template também utiliza o filtro de escape:
+
+```html
+{{ consulta.observacoes|e }}
+```
+
+Assim, um conteúdo como:
+
+```html
+<script>alert('xss')</script>
+```
+
+é apresentado como texto:
+
+```html
+&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;
+```
+
+O navegador não interpreta o conteúdo como JavaScript.
+
+## 9. Endpoint adicional corrigido
+
+O endpoint adicional analisado foi:
+
+```text
+GET /agenda
+```
+
+Esse endpoint não foi o foco principal da análise do Exercício 8, mas utiliza o mesmo campo de observações das consultas.
+
+A mesma correção foi aplicada:
+
+- template Jinja2 com auto-escape;
+- filtro `|e`;
+- ausência do filtro inseguro `|safe`;
+- filtragem de consultas por profissional;
+- autenticação JWT obrigatória.
+
+Dessa forma, a proteção não ficou limitada aos endpoints JSON.
+
+## 10. Evidências de antes e depois
+
+Os testes automatizados demonstram que os ataques deixam de funcionar após as correções.
+
+Foram testados:
+
+- username fora do padrão permitido;
+- campo não declarado no corpo da requisição;
+- criação de duas consultas no mesmo horário;
+- payload XSS no campo `observacoes`;
+- tentativa de acesso a consulta de outro profissional;
+- parâmetro de data com conteúdo semelhante a SQL Injection.
+
+Resultado final:
+
+```text
+12 passed
+```
+
+Os testes relacionados ao Exercício 9 estão no arquivo:
+
+```text
+tests/test_exercicio9.py
+```
+
+## 11. Arquivos alterados
+
+As correções foram organizadas nos seguintes arquivos:
+
+```text
+app/models.py
+app/config.py
+app/auth.py
+app/routes/consultas.py
+app/routes/agenda.py
+app/templates/consultas.html
+requirements.txt
+tests/test_exercicio9.py
+```
+
+A chave JWT real foi mantida fora do código-fonte e deve permanecer somente no arquivo `.env`, que não deve ser enviado na entrega.
+
+## 12. Conclusão
+
+As vulnerabilidades de entrada e saída foram corrigidas com validação whitelist, regex, tipos Pydantic, `extra="forbid"`, consultas parametrizadas, autenticação centralizada, verificação de ownership e auto-escape do Jinja2.
+
+Os testes automatizados confirmaram que os ataques analisados são rejeitados ou neutralizados pela aplicação, mantendo a proteção também no endpoint HTML adicional `/agenda`.
